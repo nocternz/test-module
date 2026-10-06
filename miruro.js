@@ -1,5 +1,5 @@
 // ============================================================================
-// ⚙️ SORA MODULE — MIRURO_TEST (Multi-Stream / Multi-Server Architecture)
+// ⚙️ SORA MODULE — MIRURO_TEST (Full Unified Script v1.1.3)
 // ============================================================================
 
 const BASE_URL = "https://www.miruro.to";
@@ -159,15 +159,34 @@ async function makeSecureRequest(path, query = {}, refererUrl = null) {
 // 🎬 SORA VIDEO MODULE CONTRACTS
 // ============================================================================
 
+/**
+ * 1. Resilient Search Contract (AniList GraphQL + Miruro Pipe Fallback)
+ * Schema: [{ title, image, href }]
+ */
 async function searchResults(keyword) {
+    if (!keyword || !keyword.trim()) return JSON.stringify([]);
+    const cleanQuery = keyword.trim();
+    const results = [];
+    const seenIds = new Set();
+
+    // --- Phase 1: AniList GraphQL with Synonyms & Romaji ---
     try {
         const gqlQuery = `
             query ($search: String) {
                 Page(page: 1, perPage: 25) {
-                    media(search: $search, type: ANIME, isAdult: false, sort: POPULARITY_DESC) {
+                    media(search: $search, type: ANIME, isAdult: false, sort: [SEARCH_MATCH, POPULARITY_DESC]) {
                         id
-                        title { romaji english native }
-                        coverImage { large medium }
+                        title {
+                            english
+                            romaji
+                            native
+                            userPreferred
+                        }
+                        coverImage {
+                            extraLarge
+                            large
+                            medium
+                        }
                     }
                 }
             }
@@ -175,32 +194,78 @@ async function searchResults(keyword) {
 
         const anilistRes = await soraFetch(ANILIST_GRAPHQL_URL, {
             method: "POST",
-            headers: { "Content-Type": "application/json", "Accept": "application/json" },
-            body: JSON.stringify({ query: gqlQuery, variables: { search: keyword } })
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+            body: JSON.stringify({ query: gqlQuery, variables: { search: cleanQuery } })
         });
 
-        let rawGql = typeof anilistRes?.text === 'function' ? await anilistRes.text() : (anilistRes?.data || anilistRes);
-        let parsedGql = typeof rawGql === 'string' ? JSON.parse(rawGql) : rawGql;
+        if (anilistRes) {
+            let rawGql = typeof anilistRes.text === 'function' ? await anilistRes.text() : (anilistRes.data || anilistRes);
+            let parsedGql = typeof rawGql === 'string' ? JSON.parse(rawGql) : rawGql;
 
-        const results = [];
-        if (parsedGql?.data?.Page?.media && Array.isArray(parsedGql.data.Page.media)) {
-            for (let item of parsedGql.data.Page.media) {
-                const id = item.id;
-                const title = item.title?.english || item.title?.romaji || item.title?.native || "Unknown Title";
-                const image = item.coverImage?.large || item.coverImage?.medium || "https://via.placeholder.com/200x300.png?text=No+Poster";
-                results.push({
-                    title: title,
-                    image: image,
-                    href: `miruro://${id}`
-                });
+            if (parsedGql?.data?.Page?.media && Array.isArray(parsedGql.data.Page.media)) {
+                for (let item of parsedGql.data.Page.media) {
+                    const id = String(item.id);
+                    if (seenIds.has(id)) continue;
+                    seenIds.add(id);
+
+                    const title = item.title?.userPreferred || item.title?.english || item.title?.romaji || item.title?.native || "Unknown Title";
+                    const image = item.coverImage?.extraLarge || item.coverImage?.large || item.coverImage?.medium || "https://via.placeholder.com/200x300.png?text=No+Poster";
+
+                    results.push({
+                        title: title,
+                        image: image,
+                        href: `miruro://${id}`
+                    });
+                }
             }
         }
-        return JSON.stringify(results);
-    } catch (error) {
-        return JSON.stringify([]);
+    } catch (anilistErr) {
+        // Fall through to Miruro pipe
     }
+
+    // --- Phase 2: Fallback to Miruro pipe if AniList returned 0 or hit a 429 ---
+    if (results.length === 0) {
+        try {
+            const pipeData = await makeSecureRequest("search", {
+                q: cleanQuery,
+                limit: 25,
+                offset: 0,
+                sort: "POPULARITY_DESC",
+                type: "ANIME",
+                isAdult: false
+            });
+
+            if (pipeData) {
+                let items = pipeData.results || (Array.isArray(pipeData) ? pipeData : []);
+                for (let item of items) {
+                    if (item.isAdult) continue;
+                    const id = String(item.id);
+                    if (seenIds.has(id)) continue;
+                    seenIds.add(id);
+
+                    const title = item.title?.english || item.title?.romaji || item.title?.native || item.name || "Unknown Title";
+                    const image = item.coverImage?.large || item.coverImage?.medium || item.poster || "";
+
+                    results.push({
+                        title: title,
+                        image: image,
+                        href: `miruro://${id}`
+                    });
+                }
+            }
+        } catch (pipeErr) {}
+    }
+
+    return JSON.stringify(results);
 }
 
+/**
+ * 2. Details Contract (AniList GraphQL)
+ * Schema: [{ description, aliases, airdate }]
+ */
 async function extractDetails(url) {
     try {
         const anilistId = url.replace('miruro://', '').replace(/[^0-9]/g, '');
@@ -246,6 +311,10 @@ async function extractDetails(url) {
     }
 }
 
+/**
+ * 3. Episodes Contract (AniList GraphQL Direct Numbering)
+ * Schema: [{ href, number }]
+ */
 async function extractEpisodes(url) {
     try {
         const anilistId = url.replace('miruro://', '').replace(/[^0-9]/g, '');
@@ -292,7 +361,8 @@ async function extractEpisodes(url) {
 }
 
 /**
- * 4. Stream URL Contract — Collects and returns all available provider streams
+ * 4. Stream URL Contract (All Available Providers & Categories)
+ * Schema: { streams: [{ title, streamUrl, headers? }], subtitles? }
  */
 async function extractStreamUrl(url) {
     try {
@@ -355,7 +425,7 @@ async function extractStreamUrl(url) {
         const streams = [];
         let primarySubtitle = "";
 
-        // Resolve each provider to build an exhaustive streams list
+        // Resolve each provider to build the selection list
         for (let t of targets) {
             try {
                 const res = await makeSecureRequest(t.path, {}, watchReferer);

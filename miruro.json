@@ -1,14 +1,14 @@
 {
   "sourceName": "Miruro",
-  "iconUrl": "https://www.miruro.to/favicon.ico",
+  "iconUrl": "https://barelystarted.miruro.tv/favicon.ico",
   "author": {
     "name": "nocternz",
     "icon": "https://avatars.githubusercontent.com/u/nocternz"
   },
-  "version": "1.0.4",
+  "version": "1.0.5",
   "language": "English",
-  "baseUrl": "https://www.miruro.to",
-  "searchBaseUrl": "https://www.miruro.to/search?query=",
+  "baseUrl": "https://barelystarted.miruro.tv",
+  "searchBaseUrl": "https://barelystarted.miruro.tv/search?query=",
   "scriptUrl": "https://raw.githubusercontent.com/nocternz/test-module/main/miruro.js",
   "type": "anime",
   "streamType": "HLS",

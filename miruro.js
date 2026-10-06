@@ -85,21 +85,7 @@ function safeBytesToString(u8arr) {
     }
 }
 
-// ----------------------------------------------------------------------------
-// 📦 Lightweight Embedded Gzip / Raw Deflate Reader (No Remote CDN Loading)
-// ----------------------------------------------------------------------------
 function decompressGzipOrRaw(bytes) {
-    // If runtime has native DecompressionStream support:
-    if (typeof DecompressionStream !== 'undefined') {
-        try {
-            const ds = new DecompressionStream('gzip');
-            const writer = ds.writable.getWriter();
-            writer.write(new Uint8Array(bytes));
-            writer.close();
-            // sync fallback if async cannot await inside sync flow
-        } catch (e) {}
-    }
-    // Fallback: decode raw string characters directly
     return safeBytesToString(bytes);
 }
 
@@ -128,7 +114,6 @@ async function makeSecureRequest(path, query = {}, refererUrl = null) {
         let b64Text = typeof response.text === 'function' ? await response.text() : (response.data || response);
         if (!b64Text || typeof b64Text !== 'string') return null;
 
-        // Anti-bot challenge checks
         if (b64Text.trim().startsWith("<") || b64Text.toLowerCase().includes("cloudflare") || b64Text.toLowerCase().includes("just a moment")) {
             return { _blocked_by_cloudflare: true };
         }
@@ -143,7 +128,6 @@ async function makeSecureRequest(path, query = {}, refererUrl = null) {
         const bytes = [];
         for (let i = 0; i < binaryStr.length; i++) bytes.push(binaryStr.charCodeAt(i));
 
-        // XOR decode
         for (let i = 0; i < bytes.length; i++) {
             bytes[i] ^= OBF_KEY_BYTES[i % OBF_KEY_BYTES.length];
         }
@@ -156,30 +140,22 @@ async function makeSecureRequest(path, query = {}, refererUrl = null) {
 }
 
 // ============================================================================
-// 🎬 SORA VIDEO MODULE CONTRACTS (All JSON-stringified returns)
+// 🎬 SORA VIDEO MODULE CONTRACTS
 // ============================================================================
 
 /**
  * 1. Search Contract
- * Output Schema: [{ title: string, image: string, href: string }]
+ * Schema: [{ title, image, href }]
  */
 async function searchResults(keyword) {
     try {
-        // Direct AniList GraphQL Query (Bypasses Cloudflare block on search)
         const gqlQuery = `
             query ($search: String) {
                 Page(page: 1, perPage: 25) {
                     media(search: $search, type: ANIME, isAdult: false, sort: POPULARITY_DESC) {
                         id
-                        title {
-                            romaji
-                            english
-                            native
-                        }
-                        coverImage {
-                            large
-                            medium
-                        }
+                        title { romaji english native }
+                        coverImage { large medium }
                     }
                 }
             }
@@ -187,25 +163,14 @@ async function searchResults(keyword) {
 
         const anilistRes = await soraFetch(ANILIST_GRAPHQL_URL, {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            },
-            body: JSON.stringify({
-                query: gqlQuery,
-                variables: { search: keyword }
-            })
+            headers: { "Content-Type": "application/json", "Accept": "application/json" },
+            body: JSON.stringify({ query: gqlQuery, variables: { search: keyword } })
         });
 
         let rawGql = typeof anilistRes?.text === 'function' ? await anilistRes.text() : (anilistRes?.data || anilistRes);
-        let parsedGql = null;
-
-        try {
-            parsedGql = typeof rawGql === 'string' ? JSON.parse(rawGql) : rawGql;
-        } catch (e) {}
+        let parsedGql = typeof rawGql === 'string' ? JSON.parse(rawGql) : rawGql;
 
         const results = [];
-
         if (parsedGql?.data?.Page?.media && Array.isArray(parsedGql.data.Page.media)) {
             for (let item of parsedGql.data.Page.media) {
                 const id = item.id;
@@ -217,22 +182,11 @@ async function searchResults(keyword) {
                     href: `https://www.miruro.to/watch?id=${id}`
                 });
             }
-
-            if (results.length > 0) {
-                return JSON.stringify(results);
-            }
+            if (results.length > 0) return JSON.stringify(results);
         }
 
         // Fallback: Miruro pipe search
-        const data = await makeSecureRequest("search", {
-            q: keyword,
-            limit: 25,
-            offset: 0,
-            sort: "POPULARITY_DESC",
-            type: "ANIME",
-            isAdult: false
-        });
-
+        const data = await makeSecureRequest("search", { q: keyword, limit: 25, offset: 0, sort: "POPULARITY_DESC", type: "ANIME", isAdult: false });
         if (data && !data._blocked_by_cloudflare) {
             const items = data.results || (Array.isArray(data) ? data : []);
             for (let item of items) {
@@ -240,14 +194,9 @@ async function searchResults(keyword) {
                 const id = item.id;
                 const title = item.title?.english || item.title?.romaji || item.title?.native || "Unknown Title";
                 const image = item.coverImage?.large || item.coverImage?.medium || "";
-                results.push({
-                    title: title,
-                    image: image,
-                    href: `https://www.miruro.to/watch?id=${id}`
-                });
+                results.push({ title: title, image: image, href: `https://www.miruro.to/watch?id=${id}` });
             }
         }
-
         return JSON.stringify(results);
     } catch (error) {
         return JSON.stringify([]);
@@ -256,7 +205,7 @@ async function searchResults(keyword) {
 
 /**
  * 2. Details Contract
- * Output Schema: [{ description: string, aliases: string, airdate: string }]
+ * Schema: [{ description, aliases, airdate }]
  */
 async function extractDetails(url) {
     try {
@@ -302,7 +251,7 @@ async function extractDetails(url) {
             }]);
         }
 
-        return JSON.stringify([{ description: "Metadata currently unavailable.", aliases: "", airdate: "" }]);
+        return JSON.stringify([{ description: "Metadata unavailable.", aliases: "", airdate: "" }]);
     } catch (error) {
         return JSON.stringify([{ description: "Metadata parsing failed.", aliases: "", airdate: "" }]);
     }
@@ -310,7 +259,7 @@ async function extractDetails(url) {
 
 /**
  * 3. Episodes Contract
- * Output Schema: [{ href: string, number: number }]
+ * Schema: [{ href: string, number: number }]
  */
 async function extractEpisodes(url) {
     try {
@@ -319,39 +268,80 @@ async function extractEpisodes(url) {
 
         if (!anilistId) return JSON.stringify([]);
 
-        const data = await makeSecureRequest("episodes", { anilistId: anilistId }, url);
-        if (!data || data._blocked_by_cloudflare) return JSON.stringify([]);
+        const watchUrl = `${BASE_URL}/watch?id=${anilistId}`;
+        const pipeData = await makeSecureRequest("episodes", { anilistId: anilistId }, watchUrl);
 
-        let allEps = [];
-        function searchEpisodes(obj) {
-            if (Array.isArray(obj)) {
-                if (obj.length > 0 && obj[0].id !== undefined && obj[0].number !== undefined) {
-                    allEps = allEps.concat(obj);
-                } else {
-                    obj.forEach(searchEpisodes);
-                }
-            } else if (typeof obj === 'object' && obj !== null) {
-                Object.values(obj).forEach(searchEpisodes);
-            }
-        }
-        searchEpisodes(data);
-
-        const uniqueEps = [];
+        const collectedEpisodes = [];
         const seenNumbers = new Set();
 
-        for (let ep of allEps) {
-            const epNum = parseFloat(ep.number);
-            if (!seenNumbers.has(epNum)) {
-                seenNumbers.add(epNum);
-                uniqueEps.push({
-                    href: `https://www.miruro.to/watch?id=${anilistId}&ep=${epNum}`,
-                    number: epNum
-                });
+        // Recursive traverser to extract episode objects from nested providers/categories
+        function traverseAndCollect(node) {
+            if (!node) return;
+            if (Array.isArray(node)) {
+                for (let item of node) {
+                    if (item && (item.number !== undefined || item.episode !== undefined || item.ep !== undefined)) {
+                        const rawNum = item.number ?? item.episode ?? item.ep;
+                        const num = parseFloat(rawNum);
+                        if (!isNaN(num) && !seenNumbers.has(num)) {
+                            seenNumbers.add(num);
+                            collectedEpisodes.push({
+                                href: `https://www.miruro.to/watch?id=${anilistId}&ep=${num}`,
+                                number: num
+                            });
+                        }
+                    } else if (typeof item === 'object') {
+                        traverseAndCollect(item);
+                    }
+                }
+            } else if (typeof node === 'object') {
+                for (let key in node) {
+                    traverseAndCollect(node[key]);
+                }
             }
         }
 
-        uniqueEps.sort((a, b) => a.number - b.number);
-        return JSON.stringify(uniqueEps);
+        if (pipeData && !pipeData._blocked_by_cloudflare) {
+            traverseAndCollect(pipeData);
+        }
+
+        // Fallback: If Miruro's pipe yields 0 episodes or fails, query total episode count from AniList
+        if (collectedEpisodes.length === 0) {
+            const countGql = `
+                query ($id: Int) {
+                    Media(id: $id, type: ANIME) {
+                        episodes
+                        nextAiringEpisode { episode }
+                    }
+                }
+            `;
+
+            const anilistRes = await soraFetch(ANILIST_GRAPHQL_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Accept": "application/json" },
+                body: JSON.stringify({ query: countGql, variables: { id: parseInt(anilistId) } })
+            });
+
+            let raw = typeof anilistRes?.text === 'function' ? await anilistRes.text() : (anilistRes?.data || anilistRes);
+            let parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+
+            let totalCount = parsed?.data?.Media?.episodes;
+            if (!totalCount && parsed?.data?.Media?.nextAiringEpisode?.episode) {
+                totalCount = parsed.data.Media.nextAiringEpisode.episode - 1;
+            }
+
+            // Generate sequential episode list
+            if (totalCount && totalCount > 0) {
+                for (let i = 1; i <= totalCount; i++) {
+                    collectedEpisodes.push({
+                        href: `https://www.miruro.to/watch?id=${anilistId}&ep=${i}`,
+                        number: i
+                    });
+                }
+            }
+        }
+
+        collectedEpisodes.sort((a, b) => a.number - b.number);
+        return JSON.stringify(collectedEpisodes);
     } catch (error) {
         return JSON.stringify([]);
     }
@@ -359,7 +349,7 @@ async function extractEpisodes(url) {
 
 /**
  * 4. Stream URL Contract
- * Output Schema: { streams: [{ title: string, streamUrl: string, headers?: Record<string, string> }], subtitles?: string }
+ * Schema: { streams: [{ title: string, streamUrl: string, headers?: Record<string, string> }], subtitles?: string }
  */
 async function extractStreamUrl(url) {
     try {
@@ -453,7 +443,6 @@ async function extractStreamUrl(url) {
                     }
                 }
 
-                // Pick first English subtitles file if not yet found
                 if (!subtitles && Array.isArray(subArray)) {
                     for (let sub of subArray) {
                         const file = sub.url || sub.file || "";

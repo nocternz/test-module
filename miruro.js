@@ -1,5 +1,5 @@
 // ============================================================================
-// ⚙️ SORA MODULE — MIRURO (AniList Search & Episode Engine + Miruro Player)
+// ⚙️ SORA MODULE — MIRURO_TEST (Unified Pipeline & Stream Extractor)
 // ============================================================================
 
 const BASE_URL = "https://barelystarted.miruro.tv";
@@ -292,12 +292,10 @@ async function extractEpisodes(url) {
 
         let totalEpisodes = parsed?.data?.Media?.episodes;
 
-        // If airing currently, the latest available episode is the next episode minus 1
         if (!totalEpisodes && parsed?.data?.Media?.nextAiringEpisode?.episode) {
             totalEpisodes = parsed.data.Media.nextAiringEpisode.episode - 1;
         }
 
-        // Default fallback for movies / 1-episode OVAs
         if (!totalEpisodes || totalEpisodes < 1) {
             totalEpisodes = 1;
         }
@@ -317,7 +315,7 @@ async function extractEpisodes(url) {
 }
 
 /**
- * 4. Stream URL Contract (Miruro Backend Pipe Sources)
+ * 4. Stream URL Contract (Miruro Backend Multi-Provider Engine)
  * Schema: { streams: [{ title, streamUrl, headers? }], subtitles? }
  */
 async function extractStreamUrl(url) {
@@ -326,53 +324,71 @@ async function extractStreamUrl(url) {
         const anilistId = parts[0];
         const epNumber = parts.length > 2 ? parts[2] : parts[1];
 
+        if (!anilistId) return JSON.stringify({ streams: [] });
+
         const watchReferer = `${BASE_URL}/watch/${anilistId}/${epNumber}?ep=${epNumber}`;
         const epsData = await makeSecureRequest("episodes", { anilistId: anilistId }, watchReferer);
 
         const dynamicConfigs = [];
-        if (epsData && epsData.providers) {
-            for (let provKey in epsData.providers) {
-                const provData = epsData.providers[provKey];
-                if (provData && provData.episodes && typeof provData.episodes === 'object') {
-                    for (let catKey in provData.episodes) {
-                        const epList = provData.episodes[catKey];
-                        if (Array.isArray(epList)) {
-                            const ep = epList.find(e => parseFloat(e.number) === parseFloat(epNumber));
-                            if (ep && ep.id) {
+
+        function scanProviders(obj) {
+            if (!obj || typeof obj !== 'object') return;
+            for (let key in obj) {
+                const prov = obj[key];
+                if (prov && typeof prov === 'object') {
+                    for (let cat of ['sub', 'dub', 'raw']) {
+                        if (Array.isArray(prov[cat])) {
+                            const match = prov[cat].find(e => parseFloat(e.number) === parseFloat(epNumber));
+                            if (match && match.id) {
                                 dynamicConfigs.push({
-                                    name: provKey.toLowerCase(),
-                                    cat: catKey.toLowerCase(),
-                                    id: ep.id,
-                                    lang: catKey.toLowerCase().includes('dub') ? "DUB" : "SUB"
+                                    name: key.toLowerCase(),
+                                    cat: cat,
+                                    id: match.id,
+                                    lang: cat.toUpperCase()
                                 });
                             }
                         }
+                    }
+                    if (prov.episodes && typeof prov.episodes === 'object') {
+                        scanProviders(prov.episodes);
                     }
                 }
             }
         }
 
+        if (epsData && epsData.providers) {
+            scanProviders(epsData.providers);
+        } else if (epsData) {
+            scanProviders(epsData);
+        }
+
+        // Direct common provider fallback when dynamic tree is blocked or omitted
         if (dynamicConfigs.length === 0) {
-            return JSON.stringify({ streams: [] });
+            const fallbackProviders = ["zoro", "dune", "gogo", "arc"];
+            for (let prov of fallbackProviders) {
+                dynamicConfigs.push({
+                    name: prov,
+                    cat: "sub",
+                    id: `${anilistId}-$ep-${epNumber}`,
+                    lang: "SUB"
+                });
+            }
         }
 
         const streams = [];
         let subtitles = "";
-
-        const providersRequiringAnilistId = [
-            "dune", "zoro", "arc", "kiwi", "telli", "bee", "bun", "nun", "ally", "hop"
-        ];
+        const providersRequiringAnilistId = ["dune", "zoro", "arc", "kiwi", "telli", "bee", "bun", "nun", "ally", "hop"];
 
         for (let config of dynamicConfigs) {
             try {
-                const reqQuery = {
+                let reqQuery = {
                     episodeId: config.id,
                     provider: config.name,
                     category: config.cat,
                     ttl: 86400
                 };
 
-                if (providersRequiringAnilistId.includes(config.name)) {
+                if (providersRequiringAnilistId.includes(config.name) || !config.id.includes("-")) {
                     reqQuery.anilistId = parseInt(anilistId);
                 }
 
@@ -383,15 +399,12 @@ async function extractStreamUrl(url) {
                 let subArray = res.subtitles || [];
 
                 if (!Array.isArray(videoArray) || videoArray.length === 0) {
-                    const possibleKeys = [config.cat, 'sub', 'ssub', 'dub', 'hdub', 'hsub'];
-                    for (let k of possibleKeys) {
-                        if (res[k]?.streams && Array.isArray(res[k].streams)) {
-                            videoArray = res[k].streams;
-                            subArray = res[k].subtitles || subArray;
+                    for (let k of [config.cat, 'sub', 'dub', 'streams', 'sources']) {
+                        if (res[k] && Array.isArray(res[k])) {
+                            videoArray = res[k];
                             break;
-                        } else if (res[k]?.sources && Array.isArray(res[k].sources)) {
-                            videoArray = res[k].sources;
-                            subArray = res[k].subtitles || subArray;
+                        } else if (res[k]?.streams && Array.isArray(res[k].streams)) {
+                            videoArray = res[k].streams;
                             break;
                         }
                     }
@@ -408,11 +421,12 @@ async function extractStreamUrl(url) {
 
                         const label = s.quality || '1080p';
                         streams.push({
-                            title: `Server ${config.name.toUpperCase()} (${label}) [${config.lang}]`,
+                            title: `${config.name.toUpperCase()} • ${label} • ${config.lang}`,
                             streamUrl: streamUrl,
                             headers: {
                                 "Referer": s.referer || `${BASE_URL}/`,
-                                "Origin": BASE_URL
+                                "Origin": BASE_URL,
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
                             }
                         });
                     }
@@ -428,7 +442,7 @@ async function extractStreamUrl(url) {
                         }
                     }
                 }
-            } catch (e) {}
+            } catch (err) {}
         }
 
         return JSON.stringify({

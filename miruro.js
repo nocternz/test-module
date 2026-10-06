@@ -1,5 +1,5 @@
 // ============================================================================
-// ⚙️ SORA MODULE — MIRURO_TEST (Full Diagnostic Engine v1.1.4)
+// ⚙️ SORA MODULE — MIRURO_TEST (Production Multi-Server Engine v1.1.5)
 // ============================================================================
 
 const BASE_URL = "https://www.miruro.to";
@@ -169,7 +169,6 @@ async function searchResults(keyword) {
     const results = [];
     const seenIds = new Set();
 
-    // --- Phase 1: AniList GraphQL with Synonyms & Romaji ---
     try {
         const gqlQuery = `
             query ($search: String) {
@@ -224,7 +223,6 @@ async function searchResults(keyword) {
         }
     } catch (anilistErr) {}
 
-    // --- Phase 2: Fallback to Miruro pipe if AniList returned 0 or hit a 429 ---
     if (results.length === 0) {
         try {
             const pipeData = await makeSecureRequest("search", {
@@ -359,78 +357,136 @@ async function extractEpisodes(url) {
 }
 
 /**
- * 4. Diagnostic Stream URL Contract (Surfaces Pipe Output to App UI)
+ * 4. Production Stream URL Contract (Populates All Providers: Kiwi, Zoro, Arc, Sun, etc.)
  * Schema: { streams: [{ title, streamUrl, headers? }], subtitles? }
  */
 async function extractStreamUrl(url) {
-    const logs = [];
     try {
         const parts = url.replace('miruro-play://', '').split('/');
         const anilistId = parts[0];
         const targetEp = parseFloat(parts.length > 2 ? parts[2] : parts[1]);
+
+        if (!anilistId) return JSON.stringify({ streams: [] });
+
         const watchReferer = `${BASE_URL}/watch/${anilistId}/${targetEp}?ep=${targetEp}`;
 
-        logs.push(`Testing AL_ID: ${anilistId} | EP: ${targetEp}`);
+        // 1. Fetch provider episode structure
+        const epsData = await makeSecureRequest("episodes", { anilistId: anilistId }, watchReferer);
+        
+        const targets = [];
+        const seenTargets = new Set();
 
-        // Step 1: Raw pipe fetch
-        const payload = { path: "episodes", method: "GET", query: { anilistId: anilistId }, body: null, version: "0.2.0" };
-        const encodedPayload = base64UrlEncode(payload);
-        const testUrl = `${PIPE_URL}?e=${encodedPayload}`;
+        if (epsData && epsData.providers) {
+            for (let provKey in epsData.providers) {
+                const prov = epsData.providers[provKey];
+                const cleanProv = provKey.toLowerCase();
 
-        const res = await soraFetch(testUrl, {
-            method: 'GET',
-            headers: {
-                "Accept": "*/*",
-                "Origin": BASE_URL,
-                "Referer": watchReferer
-            },
-            opts: { impersonate: "chrome" }
-        });
-
-        if (!res) {
-            logs.push("ERR: soraFetch returned null");
-        } else {
-            const rawText = typeof res.text === 'function' ? await res.text() : (res.data || String(res));
-            const httpLen = rawText ? rawText.length : 0;
-            logs.push(`HTTP Body Len: ${httpLen}`);
-
-            if (httpLen < 150) {
-                logs.push(`Raw Head: ${String(rawText).slice(0, 45).replace(/\n/g, '')}`);
-            }
-
-            // Step 2: Test Decryption
-            let b64 = rawText.replace(/-/g, '+').replace(/_/g, '/');
-            const pad = b64.length % 4;
-            if (pad) b64 += '='.repeat(4 - pad);
-            const binaryStr = pureAtob(b64);
-
-            if (!binaryStr) {
-                logs.push("ERR: Base64 decode failed");
-            } else {
-                const bytes = [];
-                for (let i = 0; i < binaryStr.length; i++) bytes.push(binaryStr.charCodeAt(i));
-                for (let i = 0; i < bytes.length; i++) bytes[i] ^= OBF_KEY_BYTES[i % OBF_KEY_BYTES.length];
-                const decodedStr = inflateRawBytes(bytes);
-
-                logs.push(`Decoded Len: ${decodedStr.length}`);
-                
-                try {
-                    const parsed = JSON.parse(decodedStr);
-                    const provs = parsed.providers ? Object.keys(parsed.providers).join(",") : "none";
-                    logs.push(`Providers found: ${provs}`);
-                } catch (pe) {
-                    logs.push(`JSON Parse Err: ${decodedStr.slice(0, 30)}`);
+                if (prov && prov.episodes && typeof prov.episodes === 'object') {
+                    for (let catKey in prov.episodes) {
+                        const list = prov.episodes[catKey];
+                        if (Array.isArray(list)) {
+                            const match = list.find(e => parseFloat(e.number) === targetEp);
+                            if (match && match.id) {
+                                const targetPath = match.id.startsWith("watch/")
+                                    ? match.id
+                                    : `watch/${cleanProv}/${anilistId}/${catKey.toLowerCase()}/${match.id}`;
+                                
+                                if (!seenTargets.has(targetPath)) {
+                                    seenTargets.add(targetPath);
+                                    targets.push({
+                                        path: targetPath,
+                                        provider: cleanProv,
+                                        cat: catKey.toLowerCase(),
+                                        id: match.id,
+                                        lang: catKey.toUpperCase()
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-    } catch (err) {
-        logs.push(`CRASH: ${err.message}`);
-    }
 
-    return JSON.stringify({
-        streams: logs.map(msg => ({
-            title: msg,
-            streamUrl: "https://invalid.test/stream.m3u8"
-        }))
-    });
+        // Direct server fallbacks if the episode tree is minimal
+        if (targets.length === 0) {
+            const fallbackServers = ["kiwi", "zoro", "arc", "sun", "hop", "telli"];
+            for (let s of fallbackServers) {
+                targets.push({
+                    path: `watch/${s}/${anilistId}/sub/${targetEp}`,
+                    provider: s,
+                    cat: "sub",
+                    id: `${anilistId}-${targetEp}`,
+                    lang: "SUB"
+                });
+            }
+        }
+
+        const streams = [];
+        let primarySubtitle = "";
+
+        // 2. Query each provider route and assemble the full selection list
+        for (let t of targets) {
+            try {
+                let res = await makeSecureRequest(t.path, {}, watchReferer);
+                
+                // Fallback to query format if direct watch path returned empty
+                if (!res || (!res.streams && !res.sources)) {
+                    res = await makeSecureRequest("sources", {
+                        episodeId: t.id,
+                        provider: t.provider,
+                        category: t.cat,
+                        anilistId: parseInt(anilistId),
+                        ttl: 86400
+                    }, watchReferer);
+                }
+
+                if (!res) continue;
+
+                let videoList = res.streams || res.sources || [];
+                let subList = res.subtitles || [];
+
+                if (Array.isArray(videoList)) {
+                    for (let s of videoList) {
+                        if (!s.url) continue;
+
+                        let streamUrl = s.url;
+                        if (streamUrl.includes("uwu.m3u8")) {
+                            streamUrl = streamUrl.replace("/stream/", "/hls/").replace("uwu.m3u8", "owo.m3u8");
+                        }
+
+                        const quality = s.quality || 'Auto';
+                        streams.push({
+                            title: `${t.provider.toUpperCase()} • ${quality} • ${t.lang}`,
+                            streamUrl: streamUrl,
+                            headers: {
+                                "Referer": s.referer || `${BASE_URL}/`,
+                                "Origin": BASE_URL,
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                            }
+                        });
+                    }
+                }
+
+                // Capture English subtitles if available
+                if (!primarySubtitle && Array.isArray(subList)) {
+                    for (let sub of subList) {
+                        const file = sub.url || sub.file;
+                        const label = (sub.language || sub.lang || sub.label || "").toLowerCase();
+                        if (file && (label.includes("eng") || label.includes("english"))) {
+                            primarySubtitle = file;
+                            break;
+                        }
+                    }
+                }
+            } catch (err) {}
+        }
+
+        return JSON.stringify({
+            streams: streams,
+            subtitles: primarySubtitle || undefined
+        });
+    } catch (error) {
+        return JSON.stringify({ streams: [] });
+    }
 }

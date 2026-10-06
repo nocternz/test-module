@@ -1,11 +1,11 @@
 {
-  "sourceName": "Miruro_Test",
+  "sourceName": "miruro_test",
   "iconUrl": "https://barelystarted.miruro.tv/favicon.ico",
   "author": {
     "name": "nocternz",
     "icon": "https://avatars.githubusercontent.com/u/nocternz"
   },
-  "version": "1.0.6",
+  "version": "1.0.8",
   "language": "English",
   "baseUrl": "https://barelystarted.miruro.tv",
   "searchBaseUrl": "https://barelystarted.miruro.tv/search?query=",

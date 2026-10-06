@@ -1,9 +1,9 @@
 // ============================================================================
-// ⚙️ SORA MODULE — MIRURO_TEST (Direct Watch-Path Stream Architecture)
+// ⚙️ SORA MODULE — MIRURO_TEST (Reverted to miruro.to + Diagnostics)
 // ============================================================================
 
-const BASE_URL = "https://barelystarted.miruro.tv";
-const PIPE_URL = "https://barelystarted.miruro.tv/api/secure/pipe";
+const BASE_URL = "https://www.miruro.to";
+const PIPE_URL = "https://www.miruro.to/api/secure/pipe";
 const ANILIST_GRAPHQL_URL = "https://graphql.anilist.co";
 const MIRURO_PIPE_OBF_KEY = "71951034f8fbcf53d89db52ceb3dc22c";
 
@@ -39,7 +39,7 @@ async function soraFetch(url, options = { headers: {}, method: 'GET', body: null
 }
 
 // ----------------------------------------------------------------------------
-// 🛠️ Pure JS Base64 / Utility Helpers
+// 🛠️ Pure JS Base64 / Binary Helpers
 // ----------------------------------------------------------------------------
 function pureBtoa(input) {
     let str = String(input);
@@ -102,57 +102,6 @@ function inflateRawBytes(bytes) {
         offset = 2;
     }
     return safeBytesToString(bytes.slice(offset));
-}
-
-// ----------------------------------------------------------------------------
-// 🛡️ Miruro Backend Pipeline Request Handler
-// ----------------------------------------------------------------------------
-async function makeSecureRequest(path, query = {}, refererUrl = null) {
-    try {
-        const payload = { path: path, method: "GET", query: query, body: null, version: "0.2.0" };
-        const encodedPayload = base64UrlEncode(payload);
-        const url = `${PIPE_URL}?e=${encodedPayload}`;
-
-        const headers = {
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Origin": BASE_URL,
-            "Referer": refererUrl || `${BASE_URL}/`,
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin"
-        };
-
-        const response = await soraFetch(url, { 
-            method: 'GET', 
-            headers: headers, 
-            opts: { impersonate: "chrome" } 
-        });
-        
-        if (!response) return null;
-
-        let b64Text = typeof response.text === 'function' ? await response.text() : (response.data || response);
-        if (!b64Text || typeof b64Text !== 'string') return null;
-
-        let b64 = b64Text.replace(/-/g, '+').replace(/_/g, '/');
-        const pad = b64.length % 4;
-        if (pad) b64 += '='.repeat(4 - pad);
-
-        const binaryStr = pureAtob(b64);
-        if (!binaryStr) return null;
-
-        const bytes = [];
-        for (let i = 0; i < binaryStr.length; i++) bytes.push(binaryStr.charCodeAt(i));
-
-        for (let i = 0; i < bytes.length; i++) {
-            bytes[i] ^= OBF_KEY_BYTES[i % OBF_KEY_BYTES.length];
-        }
-
-        const jsonStr = inflateRawBytes(bytes);
-        return JSON.parse(jsonStr || "{}");
-    } catch (err) {
-        return null;
-    }
 }
 
 // ============================================================================
@@ -308,111 +257,70 @@ async function extractEpisodes(url) {
 }
 
 /**
- * 4. Stream URL Contract (Using Direct Provider Paths)
+ * 4. Diagnostic Stream URL Contract (Surfaces Pipe Output to App UI)
  */
 async function extractStreamUrl(url) {
+    const logs = [];
     try {
         const parts = url.replace('miruro-play://', '').split('/');
         const anilistId = parts[0];
         const targetEp = parseFloat(parts.length > 2 ? parts[2] : parts[1]);
-
-        if (!anilistId) return JSON.stringify({ streams: [] });
-
         const watchReferer = `${BASE_URL}/watch/${anilistId}/${targetEp}?ep=${targetEp}`;
-        
-        // Step 1: Query the episodes manifest from Miruro's pipe
-        const epsData = await makeSecureRequest("episodes", { anilistId: anilistId }, watchReferer);
-        
-        const targets = [];
 
-        // Step 2: Extract direct watch routes (e.g. watch/kiwi/178005/sub/animepahe-1)
-        if (epsData && epsData.providers) {
-            for (let provKey in epsData.providers) {
-                const prov = epsData.providers[provKey];
-                const cleanProv = provKey.toLowerCase();
+        logs.push(`Domain: miruro.to`);
+        logs.push(`ID: ${anilistId} | EP: ${targetEp}`);
 
-                if (prov && prov.episodes) {
-                    for (let catKey in prov.episodes) {
-                        const list = prov.episodes[catKey];
-                        if (Array.isArray(list)) {
-                            const match = list.find(e => parseFloat(e.number) === targetEp);
-                            if (match && match.id) {
-                                targets.push({
-                                    path: match.id.startsWith("watch/") ? match.id : `watch/${cleanProv}/${anilistId}/${catKey.toLowerCase()}/${match.id}`,
-                                    provider: cleanProv,
-                                    lang: catKey.toUpperCase()
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Construct pipe payload
+        const payload = { path: "episodes", method: "GET", query: { anilistId: anilistId }, body: null, version: "0.2.0" };
+        const encodedPayload = base64UrlEncode(payload);
+        const testUrl = `${PIPE_URL}?e=${encodedPayload}`;
 
-        // Direct path fallbacks if no manifest returned
-        if (targets.length === 0) {
-            const commonServers = ["kiwi", "arc", "zoro", "hop", "sun"];
-            for (let s of commonServers) {
-                targets.push({
-                    path: `watch/${s}/${anilistId}/sub/${targetEp}`,
-                    provider: s,
-                    lang: "SUB"
-                });
-            }
-        }
-
-        const streams = [];
-        let subtitles = "";
-
-        // Step 3: Fetch streams directly via the watch/{provider}/... endpoint
-        for (let t of targets) {
-            try {
-                const res = await makeSecureRequest(t.path, {}, watchReferer);
-                if (!res) continue;
-
-                let videoList = res.streams || res.sources || [];
-                let subList = res.subtitles || [];
-
-                if (Array.isArray(videoList)) {
-                    for (let s of videoList) {
-                        if (!s.url) continue;
-
-                        let streamUrl = s.url;
-                        if (streamUrl.includes("uwu.m3u8")) {
-                            streamUrl = streamUrl.replace("/stream/", "/hls/").replace("uwu.m3u8", "owo.m3u8");
-                        }
-
-                        const quality = s.quality || '1080p';
-                        streams.push({
-                            title: `${t.provider.toUpperCase()} • ${quality} • ${t.lang}`,
-                            streamUrl: streamUrl,
-                            headers: {
-                                "Referer": `${BASE_URL}/`,
-                                "Origin": BASE_URL,
-                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                            }
-                        });
-                    }
-                }
-
-                if (!subtitles && Array.isArray(subList)) {
-                    for (let sub of subList) {
-                        const file = sub.url || sub.file;
-                        const label = (sub.language || sub.lang || sub.label || "").toLowerCase();
-                        if (file && (label.includes("eng") || label.includes("english"))) {
-                            subtitles = file;
-                            break;
-                        }
-                    }
-                }
-            } catch (err) {}
-        }
-
-        return JSON.stringify({
-            streams: streams,
-            subtitles: subtitles || undefined
+        const res = await soraFetch(testUrl, {
+            method: 'GET',
+            headers: {
+                "Accept": "*/*",
+                "Origin": BASE_URL,
+                "Referer": watchReferer
+            },
+            opts: { impersonate: "chrome" }
         });
-    } catch (error) {
-        return JSON.stringify({ streams: [] });
+
+        if (!res) {
+            logs.push("Fetch Result: null response");
+        } else {
+            const rawText = typeof res.text === 'function' ? await res.text() : (res.data || String(res));
+            logs.push(`HTTP Length: ${rawText ? rawText.length : 0}`);
+            logs.push(`Raw: ${String(rawText).slice(0, 30).replace(/\n/g, '')}`);
+
+            try {
+                let b64 = rawText.replace(/-/g, '+').replace(/_/g, '/');
+                const pad = b64.length % 4;
+                if (pad) b64 += '='.repeat(4 - pad);
+                const binaryStr = pureAtob(b64);
+                
+                if (!binaryStr) {
+                    logs.push("Decode: Base64 decode failed");
+                } else {
+                    const bytes = [];
+                    for (let i = 0; i < binaryStr.length; i++) bytes.push(binaryStr.charCodeAt(i));
+                    for (let i = 0; i < bytes.length; i++) bytes[i] ^= OBF_KEY_BYTES[i % OBF_KEY_BYTES.length];
+                    const decodedStr = inflateRawBytes(bytes);
+                    
+                    logs.push(`Decoded Len: ${decodedStr.length}`);
+                    logs.push(`Decoded: ${decodedStr.slice(0, 35).replace(/\n/g, '')}`);
+                }
+            } catch (decErr) {
+                logs.push(`Dec Err: ${decErr.message}`);
+            }
+        }
+    } catch (err) {
+        logs.push(`Crash: ${err.message}`);
     }
+
+    return JSON.stringify({
+        streams: logs.map(msg => ({
+            title: msg,
+            streamUrl: "https://invalid.test/stream.m3u8"
+        }))
+    });
 }

@@ -2,8 +2,8 @@
 // ⚙️ SORA MODULE — MIRURO (Pure Pipeline with Embedded Deflate)
 // ============================================================================
 
-const BASE_URL = "https://www.miruro.to";
-const PIPE_URL = "https://www.miruro.to/api/secure/pipe";
+const BASE_URL = "https://barelystarted.miruro.tv";
+const PIPE_URL = "https://barelystarted.miruro.tv/api/secure/pipe";
 const MIRURO_PIPE_OBF_KEY = "71951034f8fbcf53d89db52ceb3dc22c";
 
 const OBF_KEY_BYTES = [];
@@ -88,13 +88,11 @@ function safeBytesToString(u8arr) {
 // 📦 Self-Contained Deflate Decompressor
 // ----------------------------------------------------------------------------
 function inflateRawBytes(bytes) {
-    // Check if raw characters form valid string directly
     const directStr = safeBytesToString(bytes);
     if (directStr && (directStr.trim().startsWith("{") || directStr.trim().startsWith("["))) {
         return directStr;
     }
 
-    // Skip GZIP header if present (ID1=31, ID2=139)
     let offset = 0;
     if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
         offset = 10;
@@ -104,7 +102,6 @@ function inflateRawBytes(bytes) {
         if (flg & 16) { while (bytes[offset++] !== 0); }
         if (flg & 2) { offset += 2; }
     } else if ((bytes[0] & 0x0f) === 0x08) {
-        // Zlib header
         offset = 2;
     }
 
@@ -155,7 +152,6 @@ async function makeSecureRequest(path, query = {}, refererUrl = null) {
         const bytes = [];
         for (let i = 0; i < binaryStr.length; i++) bytes.push(binaryStr.charCodeAt(i));
 
-        // Miruro XOR decryption
         for (let i = 0; i < bytes.length; i++) {
             bytes[i] ^= OBF_KEY_BYTES[i % OBF_KEY_BYTES.length];
         }
@@ -171,10 +167,6 @@ async function makeSecureRequest(path, query = {}, refererUrl = null) {
 // 🎬 SORA VIDEO MODULE CONTRACTS
 // ============================================================================
 
-/**
- * 1. Search Contract
- * Schema: [{ title, image, href }]
- */
 async function searchResults(keyword) {
     try {
         const data = await makeSecureRequest("search", {
@@ -217,10 +209,6 @@ async function searchResults(keyword) {
     }
 }
 
-/**
- * 2. Details Contract
- * Schema: [{ description, aliases, airdate }]
- */
 async function extractDetails(url) {
     try {
         const anilistId = url.replace('miruro://', '').replace(/[^0-9]/g, '');
@@ -248,10 +236,6 @@ async function extractDetails(url) {
     }
 }
 
-/**
- * 3. Episodes Contract
- * Schema: [{ href, number }]
- */
 async function extractEpisodes(url) {
     try {
         const anilistId = url.replace('miruro://', '').replace(/[^0-9]/g, '');
@@ -294,10 +278,6 @@ async function extractEpisodes(url) {
     }
 }
 
-/**
- * 4. Stream URL Contract
- * Schema: { streams: [{ title, streamUrl, headers? }], subtitles? }
- */
 async function extractStreamUrl(url) {
     try {
         const parts = url.replace('miruro-play://', '').split('/');

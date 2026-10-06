@@ -1,1 +1,27 @@
-.
+{
+  "id": "miruro",
+  "name": "Miruro",
+  "version": "1.0.1",
+  "description": "Miruro streaming module with direct AniList GraphQL search and Miruro pipe player extraction",
+  "author": "nocternz",
+  "icon": "https://www.miruro.to/favicon.ico",
+  "scriptUrl": "https://raw.githubusercontent.com/nocternz/test-module/main/miruro.js",
+  "file": "miruro.js",
+  "site": "https://www.miruro.to",
+  "type": "anime",
+  "language": "en",
+  "subtitles": true,
+  "sync": true,
+  "supportedHosts": {
+    "sora": true,
+    "luna": true,
+    "shirox": true,
+    "eclipse": true,
+    "hiyoku": true,
+    "mojuru": true,
+    "tsumi": true,
+    "anymex": true,
+    "dartotsu": true
+  },
+  "updated": 1774843200
+}
